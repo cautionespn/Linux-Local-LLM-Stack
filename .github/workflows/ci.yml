@@ -1,0 +1,274 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Lint: bash -n, shellcheck (configured only by .shellcheckrc), actionlint
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check (bash -n)
+        run: bash -n llmstack-ubuntu.sh && bash -n tests/unit.sh
+
+      - name: Shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x llmstack-ubuntu.sh tests/unit.sh
+
+      - name: Shebang and version line
+        run: |
+          head -1 llmstack-ubuntu.sh | grep -qx '#!/bin/bash' || { echo "::error::shebang is not #!/bin/bash"; exit 1; }
+          v=$(grep -m1 '^SCRIPT_VERSION=' llmstack-ubuntu.sh | cut -d'"' -f2)
+          grep -q "^# llmstack-ubuntu.sh  v$v\$" llmstack-ubuntu.sh \
+            || { echo "::error::header version does not match SCRIPT_VERSION ($v)"; exit 1; }
+
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  # ===========================================================================
+  # Unit tests: stubbed hardware, Ollama and registry; no root, no services
+  # ===========================================================================
+  unit:
+    name: Unit tests (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tests/unit.sh
+        run: bash tests/unit.sh
+
+      - name: Real hardware detection on the runner (read-only)
+        run: |
+          out=$(LLMSTACK_CONFIG_DIR="$RUNNER_TEMP/cfg" ./llmstack-ubuntu.sh --recommend 2>&1)
+          echo "$out"
+          echo "$out" | grep -qE 'OS: +Ubuntu 24\.04' || { echo "::error::OS not detected"; exit 1; }
+          echo "$out" | grep -qE 'System RAM: +[1-9][0-9]* GB' || { echo "::error::RAM not detected"; exit 1; }
+          echo "$out" | grep -qE '^  (daily|light): ' || { echo "::error::no pick for the runner"; exit 1; }
+
+      # A 404 fails the job; any other status is the registry's problem and
+      # only warns, so CI does not depend on Ollama's uptime.
+      - name: Every shipped catalogue tag exists in the Ollama registry
+        run: |
+          c="$RUNNER_TEMP/tags/models.catalog"
+          LLMSTACK_CONFIG_DIR="$RUNNER_TEMP/tags" ./llmstack-ubuntu.sh --recommend >/dev/null
+          dead=0
+          grep -v '^#' "$c" | grep -v '^$' | cut -d'|' -f2 | sort -u > "$RUNNER_TEMP/tags.txt"
+          while IFS= read -r tag; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://registry.ollama.ai/v2/library/${tag%%:*}/manifests/${tag##*:}") || code=000
+            case "$code" in
+              200) echo "LIVE     $tag" ;;
+              404) echo "::error::DEAD $tag"; dead=$((dead + 1)) ;;
+              *)   echo "::warning::UNKNOWN $tag (HTTP $code)" ;;
+            esac
+          done < "$RUNNER_TEMP/tags.txt"
+          [ "$dead" -eq 0 ]
+
+      # The three repositories share one catalogue generation. A mismatch
+      # warns rather than fails: it means the macOS repo has moved on and
+      # this one should follow, not that this commit is broken.
+      - name: Catalogue rows match the latest macOS release
+        continue-on-error: true
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/llmstack-macos.sh" \
+            https://github.com/cautionespn/MacOS-Local-LLM-Stack/releases/latest/download/llmstack-macos.sh
+          MACOS_SCRIPT="$RUNNER_TEMP/llmstack-macos.sh" bash tests/unit.sh > "$RUNNER_TEMP/x.out" 2>&1 || true
+          grep 'rows match the macOS catalogue' "$RUNNER_TEMP/x.out"
+          if grep -q '^FAIL.*rows match the macOS catalogue' "$RUNNER_TEMP/x.out"; then
+            echo "::warning::Catalogue rows differ from the latest macOS release; bring CATALOG_GENERATION and the rows in step."
+            exit 1
+          fi
+
+  unit-2604:
+    name: Unit tests (Ubuntu 26.04 container)
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        run: |
+          grep PRETTY_NAME /etc/os-release
+          bash --version | head -1
+
+      - name: tests/unit.sh (as root, on 26.04's bash and coreutils)
+        run: bash tests/unit.sh
+
+  # ===========================================================================
+  # End to end: a real install, use, update and uninstall on a CI runner.
+  # Tiny model, CPU only (runners have no GPU). The venv job first removes
+  # the runner's preinstalled Docker so the script installs Docker Engine
+  # from Docker's apt repository, as it would on a fresh machine.
+  # ===========================================================================
+  e2e:
+    name: End to end (${{ matrix.runner }}, ${{ matrix.runtime }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            runtime: docker
+          - runner: ubuntu-24.04
+            runtime: venv
+          - runner: ubuntu-24.04-arm
+            runtime: docker
+    env:
+      MODEL: smollm2:135m
+      RUNTIME: ${{ matrix.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Remove the runner's Docker (venv job)
+        if: matrix.runtime == 'venv'
+        run: |
+          sudo systemctl stop docker.socket docker containerd 2>/dev/null || true
+          mapfile -t pkgs < <(dpkg-query -W -f '${Package}\n' 'moby-*' 'docker*' 'containerd*' 2>/dev/null | sort -u)
+          echo "Removing: ${pkgs[*]:-nothing}"
+          [ "${#pkgs[@]}" -eq 0 ] || sudo apt-get purge -y "${pkgs[@]}"
+          ! command -v docker || { echo "::error::docker still present"; exit 1; }
+
+      - name: Install
+        run: ./llmstack-ubuntu.sh --yes --webui-runtime "$RUNTIME" --model "$MODEL" --nvidia-driver skip
+
+      - name: Services are up and enabled
+        run: |
+          set -x
+          systemctl is-enabled ollama
+          systemctl is-active ollama
+          curl -fsS http://127.0.0.1:11434/api/version
+          ollama list | grep -q "^${MODEL} "
+          curl -fsS -o /dev/null http://127.0.0.1:8080
+          curl -fsS 'http://127.0.0.1:8888/search?q=ubuntu&format=json' | head -c 300; echo
+          # Ollama and SearXNG listen on loopback only; Open WebUI on all interfaces.
+          ss -ltnH 'sport = :11434' | grep -q '127.0.0.1:11434'
+          ss -ltnH 'sport = :8888'  | grep -q '127.0.0.1:8888'
+          if [ "$RUNTIME" = venv ]; then
+            systemctl is-enabled llmstack-openwebui
+            systemctl is-active llmstack-openwebui
+            [ "$(ps -o user:20= -p "$(systemctl show -p MainPID --value llmstack-openwebui)")" = open-webui ]
+            dpkg -s docker-ce >/dev/null   # installed from Docker's repository
+          else
+            sudo docker ps --format '{{.Names}}' | grep -qx llmstack-open-webui
+          fi
+          sudo docker ps --format '{{.Names}}' | grep -qx llmstack-searxng
+          [ "$(sudo stat -c %a /etc/llmstack/openwebui.env)" = 600 ]
+
+      - name: llm* commands
+        run: |
+          llmstatus | tee "$RUNNER_TEMP/status"
+          [ "$(grep -c ' UP ' "$RUNNER_TEMP/status")" -eq 3 ] || { echo "::error::not every component is UP"; exit 1; }
+          ./llmstack-ubuntu.sh --status | grep -q 'Ollama .* UP'
+
+      - name: Open WebUI is configured for web search and Ollama
+        run: |
+          if [ "$RUNTIME" = venv ]; then
+            sudo systemctl show -p Environment llmstack-openwebui | tr ' ' '\n' | grep -E 'SEARXNG_QUERY_URL|OLLAMA_BASE_URL|WEB_SEARCH'
+          else
+            sudo docker inspect llmstack-open-webui --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'SEARXNG_QUERY_URL|OLLAMA_BASE_URL|WEB_SEARCH'
+          fi | tee "$RUNNER_TEMP/env"
+          grep -qx 'SEARXNG_QUERY_URL=http://127.0.0.1:8888/search?q=<query>' "$RUNNER_TEMP/env"
+          grep -qx 'OLLAMA_BASE_URL=http://127.0.0.1:11434' "$RUNNER_TEMP/env"
+
+      - name: Re-run is idempotent and keeps the secret
+        run: |
+          before=$(sudo sha256sum /etc/llmstack/openwebui.env)
+          ./llmstack-ubuntu.sh --yes --webui-runtime "$RUNTIME" --model "$MODEL" --nvidia-driver skip
+          [ "$(sudo sha256sum /etc/llmstack/openwebui.env)" = "$before" ] || { echo "::error::secret changed"; exit 1; }
+          curl -fsS -o /dev/null http://127.0.0.1:8080
+
+      - name: Services come back after a restart
+        run: |
+          sudo systemctl restart ollama
+          if [ "$RUNTIME" = venv ]; then sudo systemctl restart llmstack-openwebui; fi
+          # Containers have restart: unless-stopped, so a daemon restart brings them back.
+          sudo systemctl restart docker
+          for _ in $(seq 1 180); do curl -fsS -o /dev/null http://127.0.0.1:8080 && break; sleep 1; done
+          curl -fsS -o /dev/null http://127.0.0.1:8080
+          curl -fsS -o /dev/null 'http://127.0.0.1:8888/search?q=test&format=json'
+          curl -fsS http://127.0.0.1:11434/api/version
+
+      - name: Benchmark measures real tok/s
+        run: |
+          ./llmstack-ubuntu.sh --benchmark --model "$MODEL" | tee "$RUNNER_TEMP/bench"
+          grep -qE "^  ${MODEL//./\\.} +[0-9]+\.[0-9] +[0-9]+% GPU" "$RUNNER_TEMP/bench"
+
+      - name: Sync against real Ollama and registry, answering no to everything
+        run: |
+          yes n | ./llmstack-ubuntu.sh --sync-models | tee "$RUNNER_TEMP/sync"
+          grep -q 'SYNC COMPLETE\|Nothing to do' "$RUNNER_TEMP/sync"
+          ollama list | grep -q "^${MODEL} "
+
+      - name: Update (docker runtime on amd64)
+        if: matrix.runtime == 'docker' && matrix.runner == 'ubuntu-24.04'
+        run: |
+          ./llmstack-ubuntu.sh --update
+          ls -d /var/lib/llmstack/open-webui.backup-*
+          curl -fsS http://127.0.0.1:11434/api/version
+
+      - name: Uninstall, answering yes to everything
+        run: |
+          yes | ./llmstack-ubuntu.sh --uninstall
+          # `! cmd` never fails a step under errexit, so each check is an if.
+          left() { if "$@" >/dev/null 2>&1; then echo "::error::still there: $*"; bad=1; else echo "gone: $*"; fi; }
+          bad=0
+          left systemctl is-active --quiet ollama
+          left systemctl is-active --quiet llmstack-openwebui
+          for p in /etc/systemd/system/ollama.service /etc/systemd/system/llmstack-openwebui.service \
+                   /usr/local/bin/ollama /usr/local/lib/ollama /etc/llmstack /opt/llmstack /var/lib/llmstack \
+                   /usr/local/bin/llmstatus /usr/local/bin/llmstart /usr/local/bin/llmstop /usr/local/bin/llmupgrade; do
+            left test -e "$p"
+          done
+          left id ollama
+          left id open-webui
+          left sh -c "ss -ltnH 'sport = :8080' | grep -q ."
+          left sh -c "ss -ltnH 'sport = :8888' | grep -q ."
+          if [ "$RUNTIME" = venv ]; then left dpkg -s docker-ce; fi
+          [ "$bad" -eq 0 ]
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          sudo journalctl -u ollama -n 80 --no-pager || true
+          sudo journalctl -u llmstack-openwebui -n 120 --no-pager || true
+          sudo docker compose -f /opt/llmstack/compose.yaml logs --tail 120 || true
+
+  # ===========================================================================
+  # Summary job for branch protection
+  # ===========================================================================
+  ci-pass:
+    name: CI Pass
+    runs-on: ubuntu-24.04
+    needs: [lint, unit, unit-2604, e2e]
+    if: always()
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || { echo "::error::a required job did not succeed"; exit 1; }; done
