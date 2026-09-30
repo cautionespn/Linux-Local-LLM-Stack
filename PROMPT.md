@@ -151,3 +151,6 @@ The `llm*` commands are system-wide scripts in `/usr/local/bin` that call sudo w
 
 ### 16.7 End-to-end coverage (amends §15)
 Three jobs: amd64 with the Docker runtime (the runner's preinstalled Docker is used, and `--update` is exercised), amd64 with the venv runtime (the runner's Docker is purged first so the script installs Docker Engine from Docker's apt repository), and arm64 (`ubuntu-24.04-arm`) with the Docker runtime. Each installs a tiny model, checks services, loopback binding and the secret's mode, re-runs, restarts services, benchmarks, syncs answering no, then uninstalls answering yes and checks nothing is left.
+
+### 16.8 An existing Docker apt source is reused (amends §11.5)
+If any apt source already points at `download.docker.com/linux/ubuntu` (typically a `.list` file from an earlier install, with its own keyring), the script installs from it instead of adding `docker.sources`; two sources for the same repository with different `Signed-By` values make apt refuse to run.

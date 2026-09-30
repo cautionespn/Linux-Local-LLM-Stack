@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Syntax check (bash -n)
         run: bash -n llmstack-ubuntu.sh && bash -n tests/unit.sh
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: tests/unit.sh
         run: bash tests/unit.sh
@@ -107,7 +107,7 @@ jobs:
     container: ubuntu:26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Versions
         run: |
@@ -141,7 +141,7 @@ jobs:
       MODEL: smollm2:135m
       RUNTIME: ${{ matrix.runtime }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Remove the runner's Docker (venv job)
         if: matrix.runtime == 'venv'
@@ -186,8 +186,11 @@ jobs:
 
       - name: Open WebUI is configured for web search and Ollama
         run: |
+          # The running process's own environment: systemctl show would
+          # shell-quote values containing < and >.
           if [ "$RUNTIME" = venv ]; then
-            sudo systemctl show -p Environment llmstack-openwebui | tr ' ' '\n' | grep -E 'SEARXNG_QUERY_URL|OLLAMA_BASE_URL|WEB_SEARCH'
+            pid=$(systemctl show -p MainPID --value llmstack-openwebui)
+            sudo cat "/proc/$pid/environ" | tr '\0' '\n' | grep -E 'SEARXNG_QUERY_URL|OLLAMA_BASE_URL|WEB_SEARCH'
           else
             sudo docker inspect llmstack-open-webui --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'SEARXNG_QUERY_URL|OLLAMA_BASE_URL|WEB_SEARCH'
           fi | tee "$RUNNER_TEMP/env"

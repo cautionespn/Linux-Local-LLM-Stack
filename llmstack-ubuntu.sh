@@ -1551,6 +1551,19 @@ ensure_docker() {
     fi
   fi
   log "Installing Docker Engine from Docker's apt repository"
+  # A Docker source left by an earlier install (often a .list file with a
+  # different keyring) makes apt refuse a second one with "Conflicting
+  # values set for option Signed-By". Reuse it instead of adding ours.
+  local existing
+  existing="$(grep -lsE '^[^#]*download\.docker\.com/linux/ubuntu' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null \
+    | grep -vx /etc/apt/sources.list.d/docker.sources | head -1)" || existing=""
+  if [ -n "$existing" ]; then
+    log "Using the Docker apt source already configured in $existing"
+    as_root apt-get update
+    as_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    as_root systemctl enable --now docker
+    return 0
+  fi
   as_root install -m 0755 -d /etc/apt/keyrings
   curl -fsSL --max-time 60 https://download.docker.com/linux/ubuntu/gpg | as_root tee /etc/apt/keyrings/docker.asc >/dev/null
   as_root chmod a+r /etc/apt/keyrings/docker.asc
@@ -1906,8 +1919,8 @@ BANNER
     if confirm "Remove Ollama and its ollama user?"; then
       as_root rm -f /usr/local/bin/ollama
       as_root rm -rf /usr/local/lib/ollama
-      id ollama >/dev/null 2>&1 && as_root userdel ollama 2>/dev/null || true
-      getent group ollama >/dev/null 2>&1 && as_root groupdel ollama 2>/dev/null || true
+      if id ollama >/dev/null 2>&1; then as_root userdel ollama 2>/dev/null || true; fi
+      if getent group ollama >/dev/null 2>&1; then as_root groupdel ollama 2>/dev/null || true; fi
       # Keep /usr/share/ollama if models were preserved above.
       if ! as_root test -d "$OLLAMA_MODELS_DIR"; then as_root rm -rf "$OLLAMA_HOME"; fi
       log "Ollama removed."
@@ -2101,7 +2114,9 @@ log "Preflight"
 detect_system
 os_supported || error "This script supports Ubuntu ${SUPPORTED_UBUNTU// / and }. Detected: ${OS_NAME}."
 [ "$ARCH" != "unsupported" ] || error "Unsupported CPU architecture: $(uname -m). Supported: x86_64 (amd64), aarch64 (arm64)."
-command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || error "systemd is not running. This installer needs a normal (non-container) Ubuntu with systemd."
+if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+  error "systemd is not running. This installer needs a normal (non-container) Ubuntu with systemd."
+fi
 
 cat <<'DETECTED_HDR'
 ===========================================================================
