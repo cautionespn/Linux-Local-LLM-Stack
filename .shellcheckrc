@@ -1,0 +1,21 @@
+# shellcheck configuration for llmstack-ubuntu.sh and tests/unit.sh
+#
+# CI runs plain `shellcheck -x` on both files, so this file is the only lint
+# configuration and a local run behaves exactly like CI.
+#
+# No checks are disabled globally. Known false positives are suppressed at
+# the exact line, where the reason sits next to the code:
+#
+#   SC2016  STATUS_BODY and the llm* command templates are single-quoted on
+#           purpose: expansion happens later, when the command runs. The
+#           tests disable it file-wide because check() evaluates its
+#           argument later.
+#   SC1091  `source=/dev/null` on the config file, which is written at
+#           install time and cannot be followed statically.
+#
+# Only add a global `disable=` here for a code that fires across the whole
+# file, with a comment explaining why it is a false positive. A global
+# disable hides every future instance, including real bugs.
+
+# Follow `source` directives without needing -x on every invocation.
+external-sources=true
