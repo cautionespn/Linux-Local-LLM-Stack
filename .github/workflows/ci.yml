@@ -237,11 +237,12 @@ jobs:
       - name: Switching from venv to docker removes the unit and, on yes, the venv
         if: matrix.runtime == 'venv'
         run: |
+          set -o pipefail   # keep the installer's exit status through tee
           # --yes answers the go-ahead; the venv deletion question reads the y.
           printf 'y\n' | ./llmstack-ubuntu.sh --yes --webui-runtime docker --model "$MODEL" --nvidia-driver skip | tee "$RUNNER_TEMP/switch"
           grep -q 'Delete the venv Open WebUI install' "$RUNNER_TEMP/switch" || { echo "::error::no venv deletion question"; exit 1; }
           bad=0
-          for p in /etc/systemd/system/llmstack-openwebui.service /opt/llmstack/openwebui-venv /opt/llmstack/python; do
+          for p in /etc/systemd/system/llmstack-openwebui.service /opt/llmstack/openwebui-venv /opt/llmstack/python /opt/llmstack/.uv-cache; do
             if [ -e "$p" ]; then echo "::error::still there after the switch: $p"; bad=1; fi
           done
           if systemctl cat llmstack-openwebui >/dev/null 2>&1; then echo "::error::systemd still knows llmstack-openwebui"; bad=1; fi

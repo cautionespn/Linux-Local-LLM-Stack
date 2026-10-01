@@ -2188,26 +2188,32 @@ if [ "$WEBUI_RUNTIME" = "venv" ]; then
   setup_webui_venv
 else
   # Switching from venv to docker: retire the venv service and offer its
-  # files. Before 1.0.1 the disabled unit and several GB of venv stayed.
-  # The unit is regenerated on a switch back, so it always goes; the venv
-  # takes minutes to rebuild, so it goes only on a yes (--yes never answers).
+  # files, once, at the switch. Before 1.0.1 the disabled unit and several
+  # GB stayed. The unit is regenerated on a switch back, so it always goes;
+  # the venv takes minutes to rebuild, so it goes only on a yes (--yes never
+  # answers). uv hard-links packages from its cache into the venv, so the
+  # cache goes with it or the space is not freed.
   if [ -f "$WEBUI_UNIT" ]; then
     log "Removing the venv Open WebUI service (runtime is now docker)"
     as_root systemctl disable --now llmstack-openwebui 2>/dev/null || true
     as_root rm -f "$WEBUI_UNIT"
     as_root systemctl daemon-reload
-  fi
-  if [ -d "$VENV_DIR" ] || [ -d "$UV_PYTHON_DIR" ]; then
-    venv_size="$(as_root du -sch "$VENV_DIR" "$UV_PYTHON_DIR" 2>/dev/null | awk 'END { print $1 }' || true)"
-    echo "    The venv install of Open WebUI is no longer used: $VENV_DIR"
-    echo "    and its Python, $UV_PYTHON_DIR (${venv_size:-size unknown} together)."
-    echo "    Switching back with --webui-runtime venv rebuilds them. Accounts and"
-    echo "    chats in $DATA_DIR are shared by both runtimes and are not touched."
-    if confirm "Delete the venv Open WebUI install (${venv_size:-size unknown})?"; then
-      as_root rm -rf "$VENV_DIR" "$UV_PYTHON_DIR"
-      ok "Deleted $VENV_DIR and $UV_PYTHON_DIR"
-    else
-      log "Kept them. To delete later: sudo rm -rf $VENV_DIR $UV_PYTHON_DIR"
+    venv_paths=()
+    for d in "$VENV_DIR" "$UV_PYTHON_DIR" "$OPT_DIR/.uv-cache"; do
+      if [ -d "$d" ]; then venv_paths+=("$d"); fi
+    done
+    if [ "${#venv_paths[@]}" -gt 0 ]; then
+      venv_size="$(as_root du -sch "${venv_paths[@]}" 2>/dev/null | awk 'END { print $1 }' || true)"
+      echo "    The venv install of Open WebUI is no longer used (${venv_size:-size unknown}):"
+      printf '      %s\n' "${venv_paths[@]}"
+      echo "    Switching back with --webui-runtime venv rebuilds it. Accounts and"
+      echo "    chats in $DATA_DIR are shared by both runtimes and are not touched."
+      if confirm "Delete the venv Open WebUI install (${venv_size:-size unknown})?"; then
+        as_root rm -rf "${venv_paths[@]}"
+        ok "Deleted the venv Open WebUI install"
+      else
+        log "Kept it. To delete it later: sudo rm -rf ${venv_paths[*]}"
+      fi
     fi
   fi
 fi

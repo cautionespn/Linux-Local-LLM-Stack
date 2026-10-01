@@ -139,7 +139,7 @@ The deliverables are:
   - `After=network-online.target ollama.service`, `Wants=network-online.target`, `WantedBy=multi-user.target`
 - **Switching from venv to docker** (`WEBUI_RUNTIME=docker` and the unit file exists), before the containers start:
   1. `systemctl disable --now llmstack-openwebui`, delete the unit file, `systemctl daemon-reload`. Always: the unit is regenerated if the runtime switches back.
-  2. If `$VENV_DIR` or uv's Python (`$UV_PYTHON_DIR`, `/opt/llmstack/python`) exists, say their combined size (`du -sch`), that switching back rebuilds them and that the data is shared and untouched. Then ask `Delete the venv Open WebUI install (<size>)?` with `confirm` (defaults to no; `--yes` never answers it). Yes deletes both; no prints the `sudo rm -rf` line for later.
+  2. Still inside that "unit file exists" branch, so it is asked once, at the switch: if any of `$VENV_DIR`, uv's Python (`$UV_PYTHON_DIR`, `/opt/llmstack/python`) or uv's cache (`/opt/llmstack/.uv-cache`) exists, say their combined size (`du -sch`), that switching back rebuilds them and that the data is shared and untouched. Then ask `Delete the venv Open WebUI install (<size>)?` with `confirm` (defaults to no; `--yes` never answers it). Yes deletes all three; no prints the `sudo rm -rf` line for later. The cache must go too: uv hard-links packages from it into the venv, so deleting only the venv frees little.
   - Open WebUI data in `/var/lib/llmstack/open-webui` is shared by both runtimes and is never touched. The `open-webui` system user and `/usr/local/bin/uv` stay; `--uninstall` offers to remove them.
 - Switching from docker to venv needs nothing extra: the regenerated compose file no longer has `open-webui`, and `up -d --remove-orphans` removes its container.
 
@@ -609,7 +609,7 @@ Steps:
 10. `--benchmark` prints a row.
 11. `yes n | --sync-models` finishes and the model is kept.
 12. `--update` (amd64 docker only) leaves a backup.
-12a. Venv job only, **switch to docker:** `printf 'y\n' | ./llmstack-ubuntu.sh --yes --webui-runtime docker --model $MODEL --nvidia-driver skip`. The output contains the deletion question. Then `/etc/systemd/system/llmstack-openwebui.service`, `/opt/llmstack/openwebui-venv` and `/opt/llmstack/python` are gone, `systemctl cat llmstack-openwebui` fails, the `llmstack-open-webui` container runs, and Open WebUI answers on 8080.
+12a. Venv job only, **switch to docker:** `printf 'y\n' | ./llmstack-ubuntu.sh --yes --webui-runtime docker --model $MODEL --nvidia-driver skip`. The step sets `pipefail`, so the installer's exit status survives the `tee`. The output contains the deletion question. Then `/etc/systemd/system/llmstack-openwebui.service`, `/opt/llmstack/openwebui-venv`, `/opt/llmstack/python` and `/opt/llmstack/.uv-cache` are gone, `systemctl cat llmstack-openwebui` fails, the `llmstack-open-webui` container runs, and Open WebUI answers on 8080.
 13. `yes | --uninstall`, then check nothing is left.
 
 Write each "gone" check as `if cmd; then fail; fi`: a bare `! cmd` never fails a step under errexit.
