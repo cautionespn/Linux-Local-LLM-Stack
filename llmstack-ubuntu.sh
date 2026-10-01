@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# llmstack-ubuntu.sh  v1.0.0
+# llmstack-ubuntu.sh  v1.0.1
 #
 # A self-contained, private LLM stack for Ubuntu 24.04 and 26.04.
 #
@@ -25,7 +25,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 CATALOG_DATE="2026-09-30"
 # Shared with the macOS and Windows repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -2187,10 +2187,28 @@ if [ "$SEARXNG_MODE" = "local" ]; then write_searxng_settings; fi
 if [ "$WEBUI_RUNTIME" = "venv" ]; then
   setup_webui_venv
 else
-  # Switching from venv to docker: retire the venv service.
+  # Switching from venv to docker: retire the venv service and offer its
+  # files. Before 1.0.1 the disabled unit and several GB of venv stayed.
+  # The unit is regenerated on a switch back, so it always goes; the venv
+  # takes minutes to rebuild, so it goes only on a yes (--yes never answers).
   if [ -f "$WEBUI_UNIT" ]; then
-    log "Stopping the venv Open WebUI service (runtime is now docker)"
+    log "Removing the venv Open WebUI service (runtime is now docker)"
     as_root systemctl disable --now llmstack-openwebui 2>/dev/null || true
+    as_root rm -f "$WEBUI_UNIT"
+    as_root systemctl daemon-reload
+  fi
+  if [ -d "$VENV_DIR" ] || [ -d "$UV_PYTHON_DIR" ]; then
+    venv_size="$(as_root du -sch "$VENV_DIR" "$UV_PYTHON_DIR" 2>/dev/null | awk 'END { print $1 }' || true)"
+    echo "    The venv install of Open WebUI is no longer used: $VENV_DIR"
+    echo "    and its Python, $UV_PYTHON_DIR (${venv_size:-size unknown} together)."
+    echo "    Switching back with --webui-runtime venv rebuilds them. Accounts and"
+    echo "    chats in $DATA_DIR are shared by both runtimes and are not touched."
+    if confirm "Delete the venv Open WebUI install (${venv_size:-size unknown})?"; then
+      as_root rm -rf "$VENV_DIR" "$UV_PYTHON_DIR"
+      ok "Deleted $VENV_DIR and $UV_PYTHON_DIR"
+    else
+      log "Kept them. To delete later: sudo rm -rf $VENV_DIR $UV_PYTHON_DIR"
+    fi
   fi
 fi
 
