@@ -143,6 +143,8 @@ Settings are stored in `/etc/llmstack/config`. A later run reads them, and flags
 Choose venv if you'd rather not run Open WebUI in Docker. A local SearXNG still needs Docker; pair venv with `--searxng-url` to avoid Docker entirely.
 
 Switching is a re-run with the other `--webui-runtime`. Both use the same data directory, `/var/lib/llmstack/open-webui`, so accounts and chats carry over.
+- **venv → docker:** the `llmstack-openwebui` service is stopped and its unit file removed. The script then asks, once, whether to delete the venv, its Python and uv's package cache under `/opt/llmstack` (several GB; the default is no, and `--yes` never answers it). Switching back rebuilds them.
+- **docker → venv:** the Open WebUI container is removed; the image stays until `--uninstall`.
 
 ## How models are chosen
 
@@ -349,6 +351,10 @@ shellcheck -x llmstack-ubuntu.sh tests/unit.sh
 `PROMPT.md` is the specification the script is built to. CI (`.github/workflows/ci.yml`) runs lint, the unit tests on 24.04 and in a 26.04 container, and real installs on amd64 and arm64 runners.
 
 ## Changelog
+
+### v1.0.1
+- **Switching Open WebUI from the venv runtime to docker now cleans up.** The `llmstack-openwebui` unit file is removed (it was only disabled), and the script offers to delete the venv, its Python and uv's package cache, several GB that docker doesn't use. Accounts and chats are shared by both runtimes and untouched. A new end-to-end step switches the venv job to docker and checks the result.
+- **`PROMPT.md`** is now the full rebuild specification, exported from the maintainer's spec set.
 
 ### v1.0.0
 First release. Port of MacOS-Local-LLM-Stack v3.6.1 to Ubuntu 24.04 and 26.04 (amd64, arm64): systemd services, Open WebUI via Docker or a uv-managed venv, NVIDIA/AMD/Intel/CPU detection with VRAM-based sizing, `--benchmark`, and the shared catalogue generation 3.4.0.
