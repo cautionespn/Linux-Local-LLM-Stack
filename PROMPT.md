@@ -22,7 +22,7 @@
 | | |
 |---|---|
 | Repository | `cautionespn/Linux-Local-LLM-Stack` (public, GPL v3) |
-| Current version | 1.0.1 (2026-10-01; release `1.0.1` to be published by Chris). Previous: 1.0.0, released 2026-09-30, tag `1.0.0` |
+| Current version | 1.0.1 (2026-10-01), tag `1.0.1` |
 | Catalogue generation | 3.4.0 |
 | Verified on | CI only: real installs on GitHub `ubuntu-24.04` (amd64, both runtimes) and `ubuntu-24.04-arm`; unit tests on 24.04 and in an `ubuntu:26.04` container |
 | Not verified | real GPU hardware, a real 26.04 install, `ubuntu-drivers install` |
