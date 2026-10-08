@@ -53,7 +53,7 @@ The deliverables are:
 
 1. **`llmstack-ubuntu.sh`:** one file. The installer has no companion scripts.
 2. **`README.md`.**
-3. **`tests/unit.sh`:** about 170 checks, needing no root and no network (§15).
+3. **`tests/unit.sh`:** about 185 checks, needing no root and no network (§15).
 4. **`.github/workflows/ci.yml`** and **`.github/workflows/release-asset.yml`:**
    - The release workflow attaches the script and refuses a tag ≠ `SCRIPT_VERSION`.
    - The Quick start downloads `releases/latest/download/llmstack-ubuntu.sh`.
