@@ -352,6 +352,10 @@ shellcheck -x llmstack-ubuntu.sh tests/unit.sh
 
 ## Changelog
 
+### v1.0.2
+- **A failed `--sync-models` pull now says why.** The script checks each failed tag against the Ollama registry. If the registry has the tag, it reports that the download itself was cut off and suggests a VPN, proxy or security software that may be resetting long downloads; downloaded parts are kept, so re-running resumes them. If the tag is missing it points at the Ollama library, and if the registry does not answer it says so. Previously every failure said "Check the tag", even when the tag was fine and a corporate security tool was dropping the connection.
+- **`PROMPT.md`** updated from the maintainer's spec.
+
 ### v1.0.1
 - **Switching Open WebUI from the venv runtime to docker now cleans up.** The `llmstack-openwebui` unit file is removed (it was only disabled), and the script offers to delete the venv, its Python and uv's package cache, several GB that docker doesn't use. Accounts and chats are shared by both runtimes and untouched. A new end-to-end step switches the venv job to docker and checks the result.
 - **`PROMPT.md`** is now the full rebuild specification, exported from the maintainer's spec set.

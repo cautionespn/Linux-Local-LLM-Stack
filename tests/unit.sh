@@ -340,6 +340,30 @@ sync 'y y y y y y y y'
 check "[ $SYNC_RC -eq 1 ]" "exits 1"; called 'pull qwen3.6:35b-a3b'; not_called 'rm llama3.3:70b'
 expect 'no models were removed'
 
+# 1.0.2: the failure names its cause. The stub registry serves every tag
+# when FAKE_LIVE is unset, only the listed ones otherwise, and refuses
+# connections with FAKE_REG_DOWN.
+label="sync pull failure, live tag"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_FAIL="qwen3.6:35b-a3b"
+sync 'y y y y y y y y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; not_called 'rm llama3.3:70b'
+expect 'qwen3.6:35b-a3b +download failed \(the tag is in the registry\)'; expect 'VPN,'
+reject 'Check the tag|tag not found|registry unreachable'
+
+label="sync pull failure, missing tag"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_FAIL="qwen3.6:35b-a3b" FAKE_LIVE="llama3.3:70b"
+sync 'y y y y y y y y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"
+expect 'qwen3.6:35b-a3b +tag not found in the registry'; expect 'Check the tag at https://ollama.com/library'
+reject 'download failed|VPN,|registry unreachable'
+
+label="sync pull failure, registry down"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_FAIL="qwen3.6:35b-a3b" FAKE_REG_DOWN=1
+sync 'y y y y y y y y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"
+expect 'qwen3.6:35b-a3b +registry unreachable'; expect 'did not answer'
+reject 'Check the tag|VPN,'
+
 label="sync with Ollama down"; clear_fakes
 export FAKE_OLLAMA_DOWN=1
 sync 'y y y y'
