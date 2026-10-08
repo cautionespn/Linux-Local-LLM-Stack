@@ -12,7 +12,7 @@
 > private meta repository. The rules they share with this spec are copied
 > in below; the rest are the maintainer's working notes.
 
-# 20 — Rebuild spec: Linux-Local-LLM-Stack (`llmstack-ubuntu.sh` v1.0.1)
+# 20 — Rebuild spec: Linux-Local-LLM-Stack (`llmstack-ubuntu.sh` v1.0.2)
 
 **Use this prompt to rebuild the repository from an empty folder, or to change it.**
 - Give the whole file to Claude with the instruction: *"Build (or update) the repository described here. Follow it exactly; where it is silent, ask."*
@@ -22,7 +22,7 @@
 | | |
 |---|---|
 | Repository | `cautionespn/Linux-Local-LLM-Stack` (public, GPL v3) |
-| Current version | 1.0.1 (2026-10-01), tag `1.0.1` |
+| Current version | 1.0.2 (2026-10-08), tag `1.0.2` |
 | Catalogue generation | 3.4.0 |
 | Verified on | CI only: real installs on GitHub `ubuntu-24.04` (amd64, both runtimes) and `ubuntu-24.04-arm`; unit tests on 24.04 and in an `ubuntu:26.04` container |
 | Not verified | real GPU hardware, a real 26.04 install, `ubuntu-drivers install` |
@@ -53,7 +53,7 @@ The deliverables are:
 
 1. **`llmstack-ubuntu.sh`:** one file. The installer has no companion scripts.
 2. **`README.md`.**
-3. **`tests/unit.sh`:** about 170 checks, needing no root and no network (§15).
+3. **`tests/unit.sh`:** about 185 checks, needing no root and no network (§15).
 4. **`.github/workflows/ci.yml`** and **`.github/workflows/release-asset.yml`:**
    - The release workflow attaches the script and refuses a tag ≠ `SCRIPT_VERSION`.
    - The Quick start downloads `releases/latest/download/llmstack-ubuntu.sh`.
@@ -325,6 +325,18 @@ This mode brings installed models in line with the current picks. **The safety p
    - Warn, and say "Nothing was changed. To free space first, run --sync-models again, decline every pull, and answer yes to the removals you want."
    - Exit 1.
 7. **Pull** everything chosen. On Ctrl-C during a pull, say "Pull interrupted. Nothing was removed. Re-run to resume the download." and stop: bash traps `INT`; PowerShell, where a stop skips `catch` but runs `finally`, prints it from a `finally` guarded by "not done and no ordinary error". If any pull fails, list the failures, say "no models were removed", and exit 1.
+
+   **Say why each pull failed.** Ollama's own error does not tell a missing tag from a dropped connection, so probe each failed tag's manifest once with the registry check (the same endpoint and timeout) and print it with a reason:
+   - 200: `download failed (the tag is in the registry)`
+   - 404: `tag not found in the registry`
+   - anything else: `registry unreachable`
+
+   Then print one hint for each reason that occurred, in that order:
+   - "The registry has the tag, so the download itself was cut off. A VPN, proxy or security software between this machine and the registry may be resetting long downloads. Downloaded parts are kept, so re-running resumes them."
+   - "Check the tag at https://ollama.com/library."
+   - "The registry did not answer. Check this machine's network, then re-run."
+
+   Never suggest checking the tag when the registry served it (MBP5800, 2026-10-05: Zscaler reset every blob download while the manifests loaded, and the old message blamed the tags).
 8. **Remove**, one model at a time:
    - Show the model's name and size.
    - If `ollama show` lists an `embedding` capability, warn that Open WebUI may use it for document search.
@@ -622,5 +634,6 @@ Write each "gone" check as `if cmd; then fail; fi`: a bare `! cmd` never fails a
 
 | Version | Change |
 |---|---|
+| 1.0.2 (2026-10-08) | `--sync-models` says why each pull failed (live tag: download cut off; missing tag; registry unreachable) instead of always suggesting the tag; unit tests for all three |
 | 1.0.1 (2026-10-01) | Switching the runtime from venv to docker removes the unit file and offers to delete the venv (backlog 4g); end-to-end switch test; `PROMPT.md` exported from this spec |
 | 1.0.0 (2026-09-30) | First release; PR #1. Fixes before merge: shellcheck 0.9 SC2015; venv env check via `/proc`; reuse an existing Docker apt source; checkout v5 |
