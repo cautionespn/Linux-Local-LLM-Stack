@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# llmstack-ubuntu.sh  v1.0.2
+# llmstack-ubuntu.sh  v1.1.0
 #
 # A self-contained, private LLM stack for Ubuntu 24.04 and 26.04.
 #
@@ -25,7 +25,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.1.0"
 CATALOG_DATE="2026-09-30"
 # Shared with the macOS and Windows repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -33,6 +33,19 @@ CATALOG_DATE="2026-09-30"
 CATALOG_GENERATION="3.4.0"
 CATALOG_WARN_DAYS=90
 CATALOG_STALE_DAYS=180
+
+# --sync-models resumes a pull that was cut off (the registry still has the
+# tag) for as long as Ollama's saved progress grows. It stops after
+# RESUME_STALL_LIMIT attempts in a row that save nothing, or after
+# RESUME_BLIND_LIMIT attempts in all when progress can't be read.
+# LLMSTACK_RESUME_PAUSE (digits only) replaces the pause, for tests.
+RESUME_STALL_LIMIT=3
+RESUME_BLIND_LIMIT=10
+RESUME_PAUSE_S=10
+case "${LLMSTACK_RESUME_PAUSE:-}" in
+  ''|*[!0-9]*) ;;
+  *) RESUME_PAUSE_S="$LLMSTACK_RESUME_PAUSE" ;;
+esac
 
 # Dense-model speed gate, applied only when no discrete GPU sizes the picks
 # (CPU-only or integrated GPU): tok/s ~= memory bandwidth / model size, and
@@ -984,6 +997,94 @@ _explain_pull_failures() {
   return 0
 }
 
+# --- Resuming a cut-off pull ----------------------------------------------
+# Ollama downloads a model file in parts of up to 1 GB, 16 at a time. A reset
+# connection loses that part's bytes since its last save, and a part is saved
+# only when its connection ends cleanly or the pull stops. So a re-run
+# resumes, but how much each attempt keeps varies: 5.9 GB on MBP5800 behind
+# Zscaler on 2026-10-19, about 45 MB a connection on 2026-10-05. Measuring
+# what Ollama saved tells a slow but working link from a blocked one.
+
+# The store's blobs folder. LLMSTACK_BLOBS_DIR replaces it for tests; it is
+# only ever read.
+_blobs_dir() { printf '%s' "${LLMSTACK_BLOBS_DIR:-$OLLAMA_MODELS_DIR/blobs}"; }
+
+# Sums what Ollama has saved in blobs folder $1, reading it with the command
+# prefix in $2... (none, or sudo -n on Ubuntu). Ollama's internal format,
+# checked against server/download.go on 2026-10-19:
+#   sha256-<64 hex>              a finished blob: count its size
+#   sha256-<hex>-partial         the sparse download itself: not counted
+#   sha256-<hex>-partial-<n>     one part, JSON with "Completed":<bytes>
+# Prints the byte total, or nothing if a part file has no Completed number.
+_sum_blobs() {
+  local d="$1" listing comp
+  shift
+  listing="$("$@" ls -ln "$d" 2>/dev/null)" || return 0
+  comp="$("$@" find "$d" -maxdepth 1 -type f -name 'sha256-*-partial-*' -exec cat {} + 2>/dev/null \
+    | grep -o '"Completed":[0-9][0-9]*' || true)"
+  { printf '%s\n' "$listing" | awk 'NF >= 5 { print "L", $5, $NF }'
+    printf '%s\n' "$comp" | awk -F: 'NF == 2 { print "C", $2 }'
+  } | awk '
+    $1 == "L" && $3 ~ /^sha256-[0-9a-f]+$/ && length($3) == 71 { s += $2 }
+    $1 == "L" && $3 ~ /^sha256-[0-9a-f]+-partial-[0-9]+$/     { np++ }
+    $1 == "C"                                                  { nc++; s += $2 }
+    END { if (np == nc) printf "%.0f\n", s }'
+}
+
+# Bytes Ollama has saved, or nothing when the store can't be read. The
+# store belongs to the ollama user, and Ubuntu's default home mode hides it
+# from everyone else, so a normal user reads it through sudo -n, which never
+# prompts in the middle of a sync. Without cached sudo, progress is unknown.
+_saved_bytes() {
+  local d
+  d="$(_blobs_dir)"
+  if [ -d "$d" ] && [ -r "$d" ] && [ -x "$d" ]; then
+    _sum_blobs "$d"
+  elif [ "$(id -u)" -ne 0 ] && sudo -n test -r "$d" 2>/dev/null && sudo -n test -x "$d" 2>/dev/null; then
+    _sum_blobs "$d" sudo -n
+  fi
+}
+
+# "1.4 GB" (10^9 bytes), or "350 MB" under 1 GB.
+_human_bytes() {
+  awk -v b="$1" 'BEGIN { if (b >= 1e9) printf "%.1f GB", b / 1e9; else printf "%d MB", b / 1e6 }'
+}
+
+# Pulls $1, resuming by itself after a cut-off (shared sync contract, step
+# 7). Returns 0 once the pull succeeds, 1 when it gives up. Any registry
+# answer but 200 stops at once: a missing tag or a dead network won't
+# recover by retrying. The pause runs under the caller's INT trap.
+_pull_resuming() {
+  local tag="$1" n=0 stall=0 before after more
+  before="$(_saved_bytes)"
+  while :; do
+    n=$((n + 1))
+    if ollama pull "$tag"; then return 0; fi
+    [ "$(registry_probe "$tag")" = "LIVE" ] || return 1
+    after="$(_saved_bytes)"
+    if [ -z "$before" ] || [ -z "$after" ]; then
+      if [ "$n" -ge "$RESUME_BLIND_LIMIT" ]; then
+        warn "Giving up on $tag for now after $RESUME_BLIND_LIMIT attempts."
+        return 1
+      fi
+      warn "Attempt $n of $RESUME_BLIND_LIMIT was cut off (saved progress can't be read here). Resuming in $RESUME_PAUSE_S s (Ctrl-C stops)."
+    elif awk -v a="$after" -v b="$before" 'BEGIN { exit !(a > b) }'; then
+      stall=0
+      more="$(_human_bytes "$(awk -v a="$after" -v b="$before" 'BEGIN { printf "%.0f", a - b }')")"
+      warn "Attempt $n was cut off; $more more is saved. Resuming in $RESUME_PAUSE_S s (Ctrl-C stops)."
+    else
+      stall=$((stall + 1))
+      if [ "$stall" -ge "$RESUME_STALL_LIMIT" ]; then
+        warn "No progress in $RESUME_STALL_LIMIT attempts in a row; giving up on $tag for now."
+        return 1
+      fi
+      warn "Attempt $n was cut off and saved nothing new ($stall of $RESUME_STALL_LIMIT in a row). Resuming in $RESUME_PAUSE_S s (Ctrl-C stops)."
+    fi
+    before="$after"
+    sleep "$RESUME_PAUSE_S"
+  done
+}
+
 sync_models() {
   local listing inst="" m gen role line rows="" picks picktags sel="" cands=""
   local tag size arch roles st need sz pulled="" updated="" failed="" removed="" kept=""
@@ -1124,13 +1225,14 @@ EOF_LIST
     fi
   fi
 
-  # 6. Pull everything chosen before removing anything.
+  # 6. Pull everything chosen before removing anything. A cut-off pull
+  # resumes by itself while Ollama's saved progress grows.
   if [ -n "$sel" ]; then
     trap 'warn "Pull interrupted. Nothing was removed. Re-run to resume the download."; exit 1' INT
     while IFS='|' read -r tag size kind <&3; do
       [ -n "$tag" ] || continue
       log "Pulling $tag (about $size GB). Large downloads take a while."
-      if ollama pull "$tag"; then
+      if _pull_resuming "$tag"; then
         if [ "$kind" = "update" ]; then
           updated="${updated}${tag}"$'\n'
         else
@@ -1357,7 +1459,9 @@ MODES
                     which missing picks to pull and which installed picks to
                     update (older build than the registry's), pulls them, and
                     only then offers each other model for removal, one at a
-                    time. Every prompt defaults to no. Needs Ollama running.
+                    time. A download that is cut off resumes by itself
+                    while it keeps making progress. Every prompt defaults
+                    to no. Needs Ollama running.
     --benchmark     Measure real generation speed (tok/s) and the CPU/GPU
                     split for each installed pick, or for --model TAG.
     --uninstall     Guided teardown; asks before removing each artifact.
