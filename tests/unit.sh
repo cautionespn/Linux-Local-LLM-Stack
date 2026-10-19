@@ -341,7 +341,8 @@ fi
 # SYNC_PATH_FIRST (optional) goes first on PATH, e.g. a different sudo, and
 # SYNC_BLOBS_MODE sets the store's mode before the run.
 sync() {
-  n=$((n + 1)); SYNC_CFG="$T/cfg$n"; mkdir -p "$SYNC_CFG" "$SYNC_CFG/blobs"
+  n=$((n + 1)); SYNC_CFG="$T/cfg$n"; mkdir -p "$SYNC_CFG"
+  [ -n "${SYNC_NO_BLOBS:-}" ] || mkdir -p "$SYNC_CFG/blobs"
   [ -z "${2:-}" ] || cp "$2" "$SYNC_CFG/models.catalog"
   [ -z "${SYNC_BLOBS_MODE:-}" ] || chmod "$SYNC_BLOBS_MODE" "$SYNC_CFG/blobs"
   : > "$FAKE_OLLAMA_LOG"; : > "$FAKE_SUDO_LOG"
@@ -351,12 +352,12 @@ sync() {
     LLMSTACK_BLOBS_DIR="$SYNC_CFG/blobs" LLMSTACK_RESUME_PAUSE=0 \
     FAKE_DISK_GB="${FAKE_DISK_GB:-500}" PATH="${SYNC_PATH_FIRST:+$SYNC_PATH_FIRST:}$T/fakecurl:$T/bin:$PATH" \
     "$S" --sync-models 2>&1)" || SYNC_RC=$?
-  chmod 755 "$SYNC_CFG/blobs"
+  [ ! -d "$SYNC_CFG/blobs" ] || chmod 755 "$SYNC_CFG/blobs"
 }
 called()     { if grep -qxF -- "$1" "$FAKE_OLLAMA_LOG"; then pass "called '$1'"; else fail "expected ollama call '$1'"; fi; }
 not_called() { if grep -qxF -- "$1" "$FAKE_OLLAMA_LOG"; then fail "unexpected ollama call '$1'"; else pass "not called '$1'"; fi; }
 npulls()     { local got; got="$(grep -cxF -- "pull $1" "$FAKE_OLLAMA_LOG" || true)"; check "[ $got -eq $2 ]" "$2 pull(s) of $1 (got $got)"; }
-clear_fakes() { unset FAKE_OLLAMA_MODELS FAKE_EMBED FAKE_PULL_FAIL FAKE_OLLAMA_DOWN FAKE_STALE FAKE_REG_DOWN FAKE_DISK_GB FAKE_LIVE FAKE_PULL_SCRIPT SYNC_PATH_FIRST SYNC_BLOBS_MODE; }
+clear_fakes() { unset FAKE_OLLAMA_MODELS FAKE_EMBED FAKE_PULL_FAIL FAKE_OLLAMA_DOWN FAKE_STALE FAKE_REG_DOWN FAKE_DISK_GB FAKE_LIVE FAKE_PULL_SCRIPT SYNC_PATH_FIRST SYNC_BLOBS_MODE SYNC_NO_BLOBS; }
 
 label="sync happy path"; clear_fakes
 export FAKE_OLLAMA_MODELS="llama3.3:70b qwen2.5:32b-instruct nomic-embed-text gemma4:26b-a4b-it-qat"
@@ -438,6 +439,19 @@ sync 'y n n n y'
 check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 10
 expect "Attempt 9 of 10 was cut off \\(saved progress can't be read here\\)"; reject 'Attempt 10 of 10'
 expect 'Giving up on qwen3\.6:35b-a3b for now after 10 attempts\.'; not_called 'rm llama3.3:70b'
+
+label="sync resumes: no blobs folder, ten attempts"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=Z" SYNC_NO_BLOBS=1
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 10
+expect "Attempt 1 of 10 was cut off \\(saved progress can't be read here\\)"
+expect 'Giving up on qwen3\.6:35b-a3b for now after 10 attempts\.'
+
+label="sync resumes: progress turns unreadable late"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=PPPPPPPPPPG"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 11
+expect 'Giving up on qwen3\.6:35b-a3b for now after 11 attempts\.'; reject 'after 10 attempts'
 
 label="sync resumes: a missing tag is never retried"; clear_fakes
 export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=Z" FAKE_LIVE="llama3.3:70b"
