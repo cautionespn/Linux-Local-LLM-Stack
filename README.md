@@ -215,10 +215,18 @@ The catalogue is root-owned, so changes to it go through sudo. `--recommend` run
 1. Offers to replace a catalogue from an older generation (backup kept).
 2. Lists the current picks and whether each is installed, current or **outdated** (an older build than the registry serves; compared by manifest digest, one small request, no download).
 3. Asks, per model, which missing picks to pull and which outdated ones to update.
-4. Checks disk space, then pulls everything chosen.
+4. Checks disk space, then pulls everything chosen. A download that is cut off resumes by itself (see below).
 5. **Only if every pull succeeded**, offers each installed model that isn't a current pick for removal, one at a time, flagging embedding models Open WebUI may use for documents.
 
 Every prompt defaults to no. A failed or interrupted pull removes nothing.
+
+**When a download is cut off.** VPNs, proxies and security software sometimes reset long downloads. Ollama keeps what it has saved, so a pull can carry on where it stopped. When a pull fails and the registry still has the tag, `--sync-models` checks how much Ollama saved, waits 10 seconds and pulls again. It keeps going while each attempt saves more, and gives up after 3 attempts in a row that save nothing. Each attempt prints one line, for example:
+
+```
+WARNING: Attempt 2 was cut off; 3.4 GB more is saved. Resuming in 10 s (Ctrl-C stops).
+```
+
+Ctrl-C stops everything and removes nothing; running `--sync-models` again carries on from what was saved. A tag the registry doesn't have is never retried. The check reads Ollama's own progress files in `/usr/share/ollama/.ollama/models/blobs`, which belong to the `ollama` user. Run as root, or with sudo credentials already cached (`sudo -v`), the script reads them; it never stops to ask for a password. If it can't read them, it tries up to 10 times in all instead.
 
 ## Benchmarking
 
@@ -351,6 +359,11 @@ shellcheck -x llmstack-ubuntu.sh tests/unit.sh
 `PROMPT.md` is the specification the script is built to. CI (`.github/workflows/ci.yml`) runs lint, the unit tests on 24.04 and in a 26.04 container, and real installs on amd64 and arm64 runners.
 
 ## Changelog
+
+### v1.1.0
+- **`--sync-models` resumes a cut-off download by itself.** When a pull fails and the registry still has the tag, the script measures what Ollama has saved, pauses 10 seconds and pulls again, printing how much the last attempt kept. It carries on while attempts keep saving more and gives up after 3 in a row that save nothing, or after 10 in all if Ollama's progress files can't be read. Those files belong to the `ollama` user, so a normal user's run reads them with `sudo -n`, which never prompts. Ctrl-C still stops everything with nothing removed. The same change as MacOS-Local-LLM-Stack 3.7.0, found on a work laptop whose security software reset a 23 GB download after 5.9 GB.
+- **Verified:** stub-tested in the unit tests. The stub writes the same part files Ollama writes, and the cases cover progress then success, no progress, a count reset by progress, unreadable progress, a missing tag, and a store hidden from the user (read with `sudo -n`, or not at all). **Not verified:** a real download cut off by a proxy; the progress-file format was read from Ollama's source (`server/download.go`, 2026-10-19), not observed on a machine.
+- **`PROMPT.md`** updated from the maintainer's spec.
 
 ### v1.0.2
 - **A failed `--sync-models` pull now says why.** The script checks each failed tag against the Ollama registry. If the registry has the tag, it reports that the download itself was cut off and suggests a VPN, proxy or security software that may be resetting long downloads; downloaded parts are kept, so re-running resumes them. If the tag is missing it points at the Ollama library, and if the registry does not answer it says so. Previously every failure said "Check the tag", even when the tag was fine and a corporate security tool was dropping the connection. Tested against a stub registry in CI; not yet reproduced end to end on a machine behind an intercepting proxy.

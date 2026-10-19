@@ -25,7 +25,7 @@ check()  { if eval "$1"; then pass "$2"; else fail "$2"; fi; }   # check 'test e
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
-mkdir -p "$T/bin" "$T/fakecurl" "$T/deadcurl" "$T/nosudo"
+mkdir -p "$T/bin" "$T/fakecurl" "$T/deadcurl" "$T/nosudo" "$T/rootsudo"
 cat > "$T/bin/nvidia-smi" <<'EOF'
 #!/bin/bash
 # FAKE_NVSMI holds the CSV rows; unset means installed but no working driver.
@@ -59,6 +59,15 @@ cat > "$T/nosudo/sudo" <<'EOF'
 echo "sudo: a password is required" >&2
 exit 1
 EOF
+# Stands in for root reading a store that hides from this user: logs its
+# arguments, opens the store for the one command, then closes it again.
+cat > "$T/rootsudo/sudo" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$FAKE_SUDO_LOG"
+[ "$1" = "-n" ] && shift
+chmod 755 "$LLMSTACK_BLOBS_DIR"; "$@"; rc=$?; chmod 000 "$LLMSTACK_BLOBS_DIR"
+exit "$rc"
+EOF
 cat > "$T/bin/ollama" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_OLLAMA_LOG"
@@ -75,7 +84,30 @@ case "$1" in
       id="$(printf 'manifest:%s:%s' "$n" "$rev" | sha256sum | cut -c1-12)"
       echo "$m    $id    4.1 GB    2 weeks ago"
     done ;;
-  pull) case " ${FAKE_PULL_FAIL:-} " in *" $2 "*) echo "Error: pull failed" >&2; exit 1 ;; esac ;;
+  pull)
+    case " ${FAKE_PULL_FAIL:-} " in *" $2 "*) echo "Error: pull failed" >&2; exit 1 ;; esac
+    # FAKE_PULL_SCRIPT="<tag>=<letters>", one letter per attempt, the last
+    # repeating. Writes what real Ollama leaves in the store: P cut off after
+    # saving 100 MB more (a part file's Completed), Z cut off saving nothing,
+    # G cut off leaving a part file with no Completed, O pulled (parts gone,
+    # finished blob written). The download file itself is sparse at full
+    # size, as Ollama's is. The store may be mode 000 (see rootsudo).
+    for spec in ${FAKE_PULL_SCRIPT:-}; do
+      [ "${spec%%=*}" = "$2" ] || continue
+      letters="${spec#*=}"; b="$LLMSTACK_BLOBS_DIR"
+      cf="$b.attempts-$2"; k=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 )); echo "$k" > "$cf"
+      l="${letters:$((k - 1)):1}"; [ -n "$l" ] || l="${letters: -1}"
+      d="sha256-$(printf '%s' "$2" | sha256sum | cut -c1-64)"
+      mode="$(stat -c %a "$b")"; chmod 755 "$b"
+      case "$l" in
+        P) truncate -s 4000000000 "$b/$d-partial"
+           printf '{"N":0,"Offset":0,"Size":4000000000,"Completed":%d}\n' $(( k * 100000000 )) > "$b/$d-partial-0" ;;
+        G) truncate -s 4000000000 "$b/$d-partial"; printf '{"N":0,"Offset":0}\n' > "$b/$d-partial-0" ;;
+        O) rm -f "$b/$d-partial" "$b/$d-partial-"*; head -c 1000 /dev/zero > "$b/$d"; chmod "$mode" "$b"; exit 0 ;;
+      esac
+      chmod "$mode" "$b"
+      echo "Error: max retries exceeded: read tcp: read: connection reset by peer" >&2; exit 1
+    done ;;
   rm)   echo "deleted '$2'" ;;
   show)
     case " ${FAKE_EMBED:-} " in
@@ -104,8 +136,8 @@ esac
 exit 0
 EOF
 printf '#!/bin/bash\nexit 7\n' > "$T/deadcurl/curl"
-chmod +x "$T"/bin/* "$T"/fakecurl/curl "$T"/deadcurl/curl "$T"/nosudo/sudo
-export FAKE_OLLAMA_LOG="$T/ollama.log"
+chmod +x "$T"/bin/* "$T"/fakecurl/curl "$T"/deadcurl/curl "$T"/nosudo/sudo "$T"/rootsudo/sudo
+export FAKE_OLLAMA_LOG="$T/ollama.log" FAKE_SUDO_LOG="$T/sudo.log"
 
 # ---------------------------------------------------------------------------
 # Fake hardware
@@ -306,19 +338,26 @@ fi
 # qwen3.6:35b-a3b-coding (coding), granite4.2:3b (light).
 # ===========================================================================
 # sync ANSWERS [CATALOG_FILE]: answers are one y/n per prompt, fed on stdin.
+# SYNC_PATH_FIRST (optional) goes first on PATH, e.g. a different sudo, and
+# SYNC_BLOBS_MODE sets the store's mode before the run.
 sync() {
   n=$((n + 1)); SYNC_CFG="$T/cfg$n"; mkdir -p "$SYNC_CFG"
+  [ -n "${SYNC_NO_BLOBS:-}" ] || mkdir -p "$SYNC_CFG/blobs"
   [ -z "${2:-}" ] || cp "$2" "$SYNC_CFG/models.catalog"
-  : > "$FAKE_OLLAMA_LOG"
+  [ -z "${SYNC_BLOBS_MODE:-}" ] || chmod "$SYNC_BLOBS_MODE" "$SYNC_CFG/blobs"
+  : > "$FAKE_OLLAMA_LOG"; : > "$FAKE_SUDO_LOG"
   SYNC_RC=0
   # shellcheck disable=SC2086
   out="$(printf '%s\n' $1 | LLMSTACK_ROOT="$(hw cpu64)" LLMSTACK_CONFIG_DIR="$SYNC_CFG" \
-    FAKE_DISK_GB="${FAKE_DISK_GB:-500}" PATH="$T/fakecurl:$T/bin:$PATH" \
+    LLMSTACK_BLOBS_DIR="$SYNC_CFG/blobs" LLMSTACK_RESUME_PAUSE=0 \
+    FAKE_DISK_GB="${FAKE_DISK_GB:-500}" PATH="${SYNC_PATH_FIRST:+$SYNC_PATH_FIRST:}$T/fakecurl:$T/bin:$PATH" \
     "$S" --sync-models 2>&1)" || SYNC_RC=$?
+  [ ! -d "$SYNC_CFG/blobs" ] || chmod 755 "$SYNC_CFG/blobs"
 }
 called()     { if grep -qxF -- "$1" "$FAKE_OLLAMA_LOG"; then pass "called '$1'"; else fail "expected ollama call '$1'"; fi; }
 not_called() { if grep -qxF -- "$1" "$FAKE_OLLAMA_LOG"; then fail "unexpected ollama call '$1'"; else pass "not called '$1'"; fi; }
-clear_fakes() { unset FAKE_OLLAMA_MODELS FAKE_EMBED FAKE_PULL_FAIL FAKE_OLLAMA_DOWN FAKE_STALE FAKE_REG_DOWN FAKE_DISK_GB FAKE_LIVE; }
+npulls()     { local got; got="$(grep -cxF -- "pull $1" "$FAKE_OLLAMA_LOG" || true)"; check "[ $got -eq $2 ]" "$2 pull(s) of $1 (got $got)"; }
+clear_fakes() { unset FAKE_OLLAMA_MODELS FAKE_EMBED FAKE_PULL_FAIL FAKE_OLLAMA_DOWN FAKE_STALE FAKE_REG_DOWN FAKE_DISK_GB FAKE_LIVE FAKE_PULL_SCRIPT SYNC_PATH_FIRST SYNC_BLOBS_MODE SYNC_NO_BLOBS; }
 
 label="sync happy path"; clear_fakes
 export FAKE_OLLAMA_MODELS="llama3.3:70b qwen2.5:32b-instruct nomic-embed-text gemma4:26b-a4b-it-qat"
@@ -363,6 +402,80 @@ sync 'y y y y y y y y'
 check "[ $SYNC_RC -eq 1 ]" "exits 1"; not_called 'rm llama3.3:70b'
 expect 'qwen3.6:35b-a3b +registry unreachable'; expect 'did not answer'
 reject 'Check the tag|VPN,'
+
+# 1.1.0: a cut-off pull (the registry still serves the tag) resumes by itself
+# while Ollama's saved progress grows. Prompts: qwen3.6, gemma4, coding,
+# granite, then the llama3.3 removal.
+label="sync resumes: progress twice, then pulled"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=PPO"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 0 ]" "exits 0"; npulls qwen3.6:35b-a3b 3
+expect 'Attempt 1 was cut off; 100 MB more is saved\. Resuming in 0 s \(Ctrl-C stops\)\.'
+expect 'Attempt 2 was cut off; 100 MB more is saved'; reject 'Attempt 3|giving up|Giving up|download failed'
+called 'rm llama3.3:70b'
+check 'printf "%s\n" "$out" | awk "/^  Pulled:/ { getline; print }" | grep -q "qwen3\.6:35b-a3b"' "listed under Pulled"
+# The built-in catalogue, so later runs need no sudo to write one.
+BUILTIN_CAT="$T/builtin.catalog"; cp "$SYNC_CFG/models.catalog" "$BUILTIN_CAT"
+
+label="sync resumes: no progress, three attempts"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=Z"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 3
+expect 'Attempt 1 was cut off and saved nothing new \(1 of 3 in a row\)'
+expect 'Attempt 2 was cut off and saved nothing new \(2 of 3 in a row\)'; reject '3 of 3 in a row'
+expect 'No progress in 3 attempts in a row; giving up on qwen3\.6:35b-a3b for now\.'
+expect 'qwen3\.6:35b-a3b +download failed \(the tag is in the registry\)'; not_called 'rm llama3.3:70b'
+
+label="sync resumes: growth resets the count"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=ZZPZZZ"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 6
+expect 'Attempt 3 was cut off; 300 MB more is saved'
+expect 'Attempt 5 was cut off and saved nothing new \(2 of 3 in a row\)'; not_called 'rm llama3.3:70b'
+
+label="sync resumes: unreadable progress, ten attempts"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=G"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 10
+expect "Attempt 9 of 10 was cut off \\(saved progress can't be read here\\)"; reject 'Attempt 10 of 10'
+expect 'Giving up on qwen3\.6:35b-a3b for now after 10 attempts\.'; not_called 'rm llama3.3:70b'
+
+label="sync resumes: no blobs folder, ten attempts"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=Z" SYNC_NO_BLOBS=1
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 10
+expect "Attempt 1 of 10 was cut off \\(saved progress can't be read here\\)"
+expect 'Giving up on qwen3\.6:35b-a3b for now after 10 attempts\.'
+
+label="sync resumes: progress turns unreadable late"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=PPPPPPPPPPG"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 11
+expect 'Giving up on qwen3\.6:35b-a3b for now after 11 attempts\.'; reject 'after 10 attempts'
+
+label="sync resumes: a missing tag is never retried"; clear_fakes
+export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=Z" FAKE_LIVE="llama3.3:70b"
+sync 'y n n n y'
+check "[ $SYNC_RC -eq 1 ]" "exits 1"; npulls qwen3.6:35b-a3b 1
+reject 'Attempt 1'; expect 'qwen3\.6:35b-a3b +tag not found in the registry'
+
+# The real store hides from non-root users: read it with sudo -n, or not at
+# all. Root reads it directly, so these two only run as a normal user.
+if [ "$(id -u)" -ne 0 ]; then
+  label="sync resumes: hidden store, read with sudo -n"; clear_fakes
+  export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=PPO" SYNC_BLOBS_MODE=000 SYNC_PATH_FIRST="$T/rootsudo"
+  sync 'y n n n y' "$BUILTIN_CAT"
+  check "[ $SYNC_RC -eq 0 ]" "exits 0"; npulls qwen3.6:35b-a3b 3
+  expect 'Attempt 1 was cut off; 100 MB more is saved'
+  check 'grep -q "^-n " "$FAKE_SUDO_LOG"' "sudo was called with -n"
+  check '! grep -qv "^-n " "$FAKE_SUDO_LOG"' "sudo was never called without -n"
+
+  label="sync resumes: hidden store, no sudo"; clear_fakes
+  export FAKE_OLLAMA_MODELS="llama3.3:70b" FAKE_PULL_SCRIPT="qwen3.6:35b-a3b=PPO" SYNC_BLOBS_MODE=000 SYNC_PATH_FIRST="$T/nosudo"
+  sync 'y n n n y' "$BUILTIN_CAT"
+  check "[ $SYNC_RC -eq 0 ]" "exits 0"; npulls qwen3.6:35b-a3b 3
+  expect "Attempt 1 of 10 was cut off \\(saved progress can't be read here\\)"
+fi
 
 label="sync with Ollama down"; clear_fakes
 export FAKE_OLLAMA_DOWN=1
